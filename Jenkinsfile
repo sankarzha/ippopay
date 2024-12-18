@@ -8,11 +8,15 @@ pipeline {
     ECS_SERVICE = "${ENVIRONMENT}-productname"
     ECR_REPO  = getRepoURL(env.GIT_BRANCH)
     ARTIFACTORY_TOKEN = "artifactory-auth-user-${ENVIRONMENT}"
+    DEV_ECR_REPO = "<Accountid>.dkr.ecr.eu-west-1.amazonaws.com/productcode-dev"
+    QA_ECR_REPO = "<Accountid>.dkr.ecr.eu-west-1.amazonaws.com/productcode-qa"
+    PRD_ECR_REPO = "<Accountid>.dkr.ecr.eu-west-1.amazonaws.com/productcode-prd"
+    IMAGE_TAG = "${BUILD_NUMBER}"
   }
   agent {
     kubernetes {
       label 'productcode'
-      yamlFile 'yaml/jenkins-agent-'+"${env.BRANCH_NAME == "master" ? "prd" : env.BRANCH_NAME}"+'.yaml'
+      yamlFile 'yaml/jenkins-agent-dev.yaml'
     }
   }
   stages {
@@ -38,8 +42,6 @@ pipeline {
             when {
                anyOf {
                   branch "dev"
-                  branch "qa"
-                  branch "master"
                }
             }                    
             steps {
@@ -48,11 +50,49 @@ pipeline {
                     echo $(<secrect.txt) |  podman login --password-stdin  --username AWS ${ECR_REPO}
                     export REGISTRY_AUTH_FILE=/podman/.docker/auth.json
                     podman build --tag ${ARTIFACTORY_DOCKER_IMAGE}:${BUILD_NUMBER} -f ${WORKSPACE}/Dockerfile .
-                    podman push ${ARTIFACTORY_DOCKER_IMAGE}:${BUILD_NUMBER} oci-archive:${ARTIFACTORY_DOCKER_IMAGE}.tar
+                    //podman push ${ARTIFACTORY_DOCKER_IMAGE}:${BUILD_NUMBER} oci-archive:${ARTIFACTORY_DOCKER_IMAGE}.tar
+                    podman push ${DEV_ECR_REPO}:${IMAGE_TAG}
                     '''
                 }   
             }
         }
+
+        //Promote the Image to QA
+        stage("Promote to QA") {
+        when {
+            branch "qa"
+        }
+        steps {
+            container('podman') {
+            script {
+                sh '''
+                podman pull ${DEV_ECR_REPO}:${IMAGE_TAG}
+                podman tag ${DEV_ECR_REPO}:${IMAGE_TAG} ${QA_ECR_REPO}:${IMAGE_TAG}
+                podman login --username AWS --password-stdin ${QA_ECR_REPO}
+                podman push ${QA_ECR_REPO}:${IMAGE_TAG}
+                '''
+            }
+            }
+        }
+        }
+        //Promote the image to PRD
+        stage("Promote to PRD") {
+        when {
+            branch "master"
+        }
+        steps {
+            container('podman') {
+            script {
+                sh '''
+                podman pull ${QA_ECR_REPO}:${IMAGE_TAG}
+                podman tag ${QA_ECR_REPO}:${IMAGE_TAG} ${PRD_ECR_REPO}:${IMAGE_TAG}
+                podman login --username AWS --password-stdin ${PRD_ECR_REPO}
+                podman push ${PRD_ECR_REPO}:${IMAGE_TAG}
+                '''
+            }
+            }
+        }
+
         //Container Scan if needed for security purposes
         stage("Container Scan") {
             when {
